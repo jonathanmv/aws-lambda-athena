@@ -29,8 +29,11 @@
             <artifactId>commons-lang3</artifactId>
             <version>3.5</version>
         </dependency>
-
-
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-lambda-athena</artifactId>
+            <version>1.0</version>
+        </dependency>
     </dependencies>
 
     <build>

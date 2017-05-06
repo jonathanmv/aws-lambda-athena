@@ -9,11 +9,13 @@ import org.apache.commons.lang3.StringUtils;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.Statement;
 import java.util.Formatter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.lang.RuntimeException;
 
 /**
  * Accessing to operate Athena
@@ -28,60 +30,61 @@ public class LambdaAthenaOperator implements RequestHandler<Request, Object> {
         this.regionMap.put("us-west-2", "us-west-2");
     }
 
-    public Object handleRequest(Request input, Context context) {
-        Connection conn = null;
-        Statement statement = null;
-        StringBuilder columnSb = null;
+    private void validateRequest(Request request) throws RuntimeException {
+      boolean isNotNull = request != null;
+      boolean hasRegion = !StringUtils.isBlank(request.region);
+      boolean hasS3Path = !StringUtils.isBlank(request.s3Path);
+      boolean hasSql = !StringUtils.isBlank(request.sql);
+      boolean hasColumns = !StringUtils.isBlank(request.columnListStr);
 
+      boolean isValid = isNotNull && hasRegion && hasS3Path && hasSql && hasColumns;
+      if (!isValid) {
+        throw new RuntimeException("400. Invalid Request");
+      }
+    }
+
+    private String getConnectionUrl(String region) {
+      String athenaUrl = "jdbc:awsathena://athena." + region + ".amazonaws.com:443";
+      return athenaUrl;
+    }
+
+    private Properties getConnectionProperties(String s3OutputPath) {
+      Properties properties = new Properties();
+      properties.put("s3_staging_dir", s3OutputPath);
+      properties.put("aws_credentials_provider_class", "com.amazonaws.auth.PropertiesFileCredentialsProvider");
+      properties.put("aws_credentials_provider_arguments", "config/credential");
+
+      return properties;
+    }
+
+    public Object handleRequest(Request request, Context context) {
         LambdaLogger logger = context.getLogger();
-
-        boolean valid = isRequiredValid(input);
-
-        Formatter formatter = new Formatter();
-        String athenaUrl = formatter.format("jdbc:awsathena://athena.%s.amazonaws.com:443", input.region).toString();
-        logger.log("Access to :" + athenaUrl + "\n");
-
-        if (!valid) {
-            return "Input parameters are not enough. input: " + input;
-        }
-
+        Connection connection = null;
+        Statement statement = null;
+        ResultSet rs = null;
+        StringBuilder results = new StringBuilder();
         try {
-            Class.forName("com.amazonaws.athena.jdbc.AthenaDriver");
-            Properties info = new Properties();
-            if (StringUtils.isBlank(input.s3Path)) {
-                info.put("s3_staging_dir", "s3://");
-            } else {
-                info.put("s3_staging_dir", input.s3Path);
-            }
-            info.put("aws_credentials_provider_class", "com.amazonaws.auth.PropertiesFileCredentialsProvider");
+            this.validateRequest(request);
+            logger.log("Request is valid");
 
-            // Put credential information.
-            info.put("aws_credentials_provider_arguments", "config/credential");
-
-            conn = DriverManager.getConnection(athenaUrl, info);
-
-            statement = conn.createStatement();
-            ResultSet rs = statement.executeQuery(input.sql);
-
-            String[] columnArray = input.columnListStr.split(",");
-            columnSb = new StringBuilder();
-            columnSb.append(input.columnListStr).append(System.getProperty("line.separator"));
-
+            connection = this.getConnectionFromRequest(request);
+            statement = connection.createStatement();
+            rs = statement.executeQuery(request.sql);
+            ResultSetMetaData rsmd = rs.getMetaData();
+            int numberOfColumns = rsmd.getColumnCount();
             while (rs.next()) {
-                int length = columnSb.length();
-
-                //Retrieve table column.
-                for (String column : columnArray) {
-                    if (StringUtils.isBlank(column)) {
-                        continue;
-                    }
-                    columnSb.append(",").append(rs.getString(column.trim()));
+                StringBuilder row = new StringBuilder();
+                for (int column = 1; column <= numberOfColumns; column++) {
+                  row.append(rs.getString(column));
+                  if (column < numberOfColumns) {
+                    row.append(",");
+                  }
                 }
-                columnSb.delete(length, length + 1);
-                columnSb.append(System.getProperty("line.separator"));
+                row.append(System.getProperty("line.separator"));
+                results.append(row.toString());
             }
             rs.close();
-            conn.close();
+            connection.close();
         } catch (Exception ex) {
             ex.printStackTrace();
 
@@ -94,41 +97,31 @@ public class LambdaAthenaOperator implements RequestHandler<Request, Object> {
 
             }
             try {
-                if (conn != null)
-                    conn.close();
+                if (connection != null)
+                    connection.close();
             } catch (Exception ex) {
 
                 ex.printStackTrace();
             }
         }
 
-        String result = "Input parameter:" + input.toString() + "\n\nresult:\n" + columnSb.toString();
-        logger.log("Finished connecting to Athena.\n");
-
+        String result = results.toString();
         logger.log(result);
-
         return result;
     }
 
+    private Connection getConnectionFromRequest(Request request) throws RuntimeException {
+        try {
+            Class.forName("com.amazonaws.athena.jdbc.AthenaDriver");
 
-    private boolean isRequiredValid(Request request) {
-        if (request == null) {
-            return false;
+            String athenaUrl = this.getConnectionUrl(request.region);
+            String s3OutputPath = request.s3Path;
+            Properties properties = this.getConnectionProperties(s3OutputPath);
+
+            return DriverManager.getConnection(athenaUrl, properties);
+        } catch (Exception ex) {
+            throw new RuntimeException("Couldn't open connection", ex);
         }
-
-        if (StringUtils.isBlank(request.s3Path)) {
-            return false;
-        }
-
-        if (StringUtils.isBlank(request.sql)) {
-            return false;
-        }
-
-        if (StringUtils.isBlank(request.columnListStr)) {
-            return false;
-        }
-
-        return true;
     }
 
 }
